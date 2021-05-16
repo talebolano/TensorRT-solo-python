@@ -254,8 +254,6 @@ def main():
     img = torch.randn(1,3,args.inputh,args.inputw)
     model.forward = MethodType(main_forward,model)
 
-    outs = model(img)
-    print(len(outs))
     checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
     outputname = ["output1","output2","output3"]
     onnx.export(model,img,args.outputname,verbose=True,opset_version=10,input_names=["input"],output_names=outputname)

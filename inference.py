@@ -55,19 +55,19 @@ class Preprocessimage(object):
         start = time.time()
         image = cv2.imread(image_path)#[...,::-1] # bgr rgb
         image = cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
-        img_metas = dict()
+
         H,W,_ = image.shape
 
         image = cv2.resize(image,self.inszie) #10ms
         new_H,new_W,_ = image.shape
-        img_metas["img_shape"] = image.shape
+
         image_raw =  cv2.cvtColor(image,cv2.COLOR_RGB2BGR)
         image = torch.form_numpy(image).float().cuda()
         image = image.permute(2,0,1) # chw
         image = self.Normalize(image/255.)
         image = image.unsqueeze(0)
 
-        return image,image_raw,img_metas
+        return image,image_raw
 
 
 class TRT_model(nn.Module):
@@ -179,7 +179,7 @@ def main():
     if opt.show:
         cv2.namedWindow("output",0)
     ############start inference##############
-    image, image_raw,img_metas = preprocesser.process(opt.image_path)
+    image, image_raw = preprocesser.process(opt.image_path)
     start = time.time()
     with torch.no_grad():
         result = model(image)
