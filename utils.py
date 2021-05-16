@@ -35,6 +35,30 @@ import torch
 import torch.nn as nn
 
 
+seg_num_grids = [40, 36, 24, 16, 12]
+self_strides = [8, 8, 16, 32, 32]
+mask_thr = 0.5
+update_thr = 0.05
+nms_pre =500
+max_per_img = 100
+class_num = 1000 # ins
+colors = [(np.random.random((1, 3)) * 255).tolist()[0] for i in range(class_num)]
+class_names = ["person", "bicycle", "car", "motorcycle", "airplane", "bus",
+               "train", "truck", "boat", "traffic_light", "fire_hydrant",
+               "stop_sign", "parking_meter", "bench", "bird", "cat", "dog",
+               "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+               "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+               "skis", "snowboard", "sports_ball", "kite", "baseball_bat",
+               "baseball_glove", "skateboard", "surfboard", "tennis_racket",
+               "bottle", "wine_glass", "cup", "fork", "knife", "spoon", "bowl",
+               "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+               "hot_dog", "pizza", "donut", "cake", "chair", "couch",
+               "potted_plant", "bed", "dining_table", "toilet", "tv", "laptop",
+               "mouse", "remote", "keyboard", "cell_phone", "microwave",
+               "oven", "toaster", "sink", "refrigerator", "book", "clock",
+               "vase", "scissors", "teddy_bear", "hair_drier", "toothbrush"]
+
+
 def matrix_nms(seg_masks, cate_labels, cate_scores, kernel='gaussian', sigma=2.0, sum_masks=None):
     """Matrix NMS for multi-class masks.
 
