@@ -5,7 +5,7 @@
 
 TensorRT for SOLO(use python)
 ## Enviroments
-    TensorRT >=7.2
+    TensorRT >=7.1
     Ubuntu 18.04
 
 ## A quick demo
