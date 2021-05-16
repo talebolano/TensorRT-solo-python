@@ -52,7 +52,6 @@ class Preprocessimage(object):
 		self.Normalize = Normalize(mean=[0.485,0.456,0.406],std=[0.229,0.224,0.225] ) 
 		
     def process(self,image_path):
-        start = time.time()
         image = cv2.imread(image_path)#[...,::-1] # bgr rgb
         image = cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
 
