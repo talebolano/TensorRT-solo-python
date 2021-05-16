@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+
+import cv2
+import os
+import numpy as np
+import tensorrt as trt
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.transforms import Normalize
+import time
+import argparse
+import torch
+import torch.nn as nn
+
+
+seg_num_grids = [40, 36, 24, 16, 12]
+self_strides = [8, 8, 16, 32, 32]
+mask_thr = 0.5
+update_thr = 0.05
+nms_pre =500
+max_per_img = 100
+class_num = 1000 # ins
+colors = [(np.random.random((1, 3)) * 255).tolist()[0] for i in range(class_num)]
+class_names = ["person", "bicycle", "car", "motorcycle", "airplane", "bus",
+               "train", "truck", "boat", "traffic_light", "fire_hydrant",
+               "stop_sign", "parking_meter", "bench", "bird", "cat", "dog",
+               "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+               "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+               "skis", "snowboard", "sports_ball", "kite", "baseball_bat",
+               "baseball_glove", "skateboard", "surfboard", "tennis_racket",
+               "bottle", "wine_glass", "cup", "fork", "knife", "spoon", "bowl",
+               "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+               "hot_dog", "pizza", "donut", "cake", "chair", "couch",
+               "potted_plant", "bed", "dining_table", "toilet", "tv", "laptop",
+               "mouse", "remote", "keyboard", "cell_phone", "microwave",
+               "oven", "toaster", "sink", "refrigerator", "book", "clock",
+               "vase", "scissors", "teddy_bear", "hair_drier", "toothbrush"]
+
+
+def torch_dtype_from_trt(dtype):
+    if dtype == trt.bool:
+        return torch.bool
+    elif dtype == trt.int8:
+        return torch.int8
+    elif dtype == trt.int32:
+        return torch.int32
+    elif dtype == trt.float16:
+        return torch.float16
+    elif dtype == trt.float32:
+        return torch.float32
+    else:
+        raise TypeError('%s is not supported by torch' % dtype)
+
+
+def torch_device_from_trt(device):
+    if device == trt.TensorLocation.DEVICE:
+        return torch.device('cuda')
+    elif device == trt.TensorLocation.HOST:
+        return torch.device('cpu')
+    else:
+        return TypeError('%s is not supported by torch' % device)
+
+
+class Preprocessimage(object):
+    '''
+        do pre-processing:
+        1. imread
+        2. bgr --> rgb
+        3. hwc --> chw
+        4. div 255
+        5. normalize
+    '''
+    def __init__(self,inszie):
+        self.inszie = (inszie[3],inszie[2])
+		self.Normalize = Normalize(mean=[0.485,0.456,0.406],std=[0.229,0.224,0.225] ) 
+		
+    def process(self,image_path):
+        start = time.time()
+        image = cv2.imread(image_path)#[...,::-1] # bgr rgb
+        image = cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
+        img_metas = dict()
+        H,W,_ = image.shape
+
+        image = cv2.resize(image,self.inszie) #10ms
+        new_H,new_W,_ = image.shape
+        img_metas["img_shape"] = image.shape
+        image_raw =  cv2.cvtColor(image,cv2.COLOR_RGB2BGR)
+        image = torch.form_numpy(image).float().cuda()
+        image = image.permute(2,0,1) # chw
+        image = self.Normalize(image/255.)
+        image = image.unsqueeze(0)
+
+        return image,image_raw,img_metas
+
+
+class TRT_model(nn.Module):
+    '''
+    genrate and inference tensorrt engine
+    '''
+    def __init__(self,
+                input_size,
+                onnx_path,
+                engine_path,
+                mode="fp16"):
+        super(TRT_model, self).__init__()
+        self._register_state_dict_hook(TRT_model._on_state_dict)
+        self.TRT_LOGGER = trt.Logger()
+        self.onnx_path = onnx_path
+        self.engine_path = engine_path
+        self.input_size = input_size
+        self.mode = mode
+        
+        if os.path.exists(engine_path):
+            print("loading engine file {} ...".format(engine_path))
+            trt.init_libnvinfer_plugins(self.TRT_LOGGER,"")
+            with open(engine_path,"rb") as f,\
+                trt.Runtime(self.TRT_LOGGER) as runtime:
+                    self.engine = runtime.deserialize_cuda_engine(f.read())
+        else:
+            self.engine = build_engine()
+
+        self.context = self.engine.create_execution_context()  
+
+    def _on_state_dict(self, state_dict, prefix, local_metadata):
+        state_dict[prefix + 'engine'] = bytearray(self.engine.serialize())
+
+    def build_engine():
+        EXPLICIT_BATCH = 1<<(int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        with trt.Builder(self.TRT_LOGGER) as builder,\
+            builder.create_network(EXPLICIT_BATCH) as network,\
+            trt.OnnxParser(network,self.TRT_LOGGER) as parser:
+
+            builder.max_workspace_size =1<<20
+            builder.max_batch_size = 1
+            if self.mode =="fp16":
+                print("build fp16 mode")
+                builder.fp16_mode = True
+            if not os.path.exists(self.onnx_path):
+                print("onnx file {} not found".format(self.onnx_path))
+                exit(0)
+            print("loading onnx file {} .....".format(self.onnx_path))
+
+            with open(self.onnx_path,'rb') as model:
+                print("Begining parsing....")
+                parser.parse(model.read())
+            print("completed parsing")
+            print("Building an engine from file {}".format(onnx_path))
+
+            network.get_input(0).shape = self.input_size 
+            engine = builder.build_cuda_engine(network)
+
+            print("completed build engine")
+            with open(self.engine_path,"wb") as f:
+                f.write(engine.serialize())
+            return engine
+
+    def forward(self,inputs):
+        #start = time.time()
+        bindngs = [None]*(1+3)
+        bindngs[0]= inputs.contiguous().data_ptr()
+
+        outputs = [None]*3
+        for i in range(1,4):
+            output_shape = tuple(self.context.get_binding_shape(i))
+            dtype = torch_dtype_from_trt(self.engine.get_binding_dtype(i))
+            device = torch_device_from_trt(self.engine.get_location(i))
+
+            output = torch.empty(size=output_shape,dtype=dtype,device=device)
+            outputs[i-1] = output
+            bindngs[i] = output.data_ptr()
+        
+        self.context.execute_async_v2(bindngs,
+                torch.cuda.current_stream().cuda_stream)
+
+        cate_preds = outputs[1]
+        kernel_preds = outputs[2]
+        seg_pred = outputs[0]
+        # do post-processing in pytorch
+        result = get_seg_single(cate_preds,kernel_preds,seg_pred)
+
+        return result
+
+
+def get_seg_single(cate_preds,
+                    kernel_preds,
+                    seg_preds
+                    ):
+    # process.
+    inds = (cate_preds > 0.1) # 选出类
+    cate_scores = cate_preds[inds]
+    if len(cate_scores) == 0:
+        return None
+
+    # cate_labels & kernel_preds
+    inds = inds.nonzero()
+    cate_labels = inds[:, 1]
+    kernel_preds = kernel_preds[inds[:, 0]]
+
+    # trans vector.
+    #print(seg_num_grids)
+    size_trans = cate_labels.new_tensor(seg_num_grids).pow(2).cumsum(0)
+    strides = kernel_preds.new_ones(size_trans[-1])# 3872个1
+
+    n_stage = len(seg_num_grids)
+    strides[:size_trans[0]] *= self_strides[0]
+    for ind_ in range(1, n_stage):
+        strides[size_trans[ind_-1]:size_trans[ind_]] *= self_strides[ind_]
+    strides = strides[inds[:, 0]] # [8.8.8.]
+    
+    # mask encoding.
+    I, N = kernel_preds.shape
+    kernel_preds = kernel_preds.view(I, N, 1, 1)
+    seg_preds = F.conv2d(seg_preds, kernel_preds, stride=1).squeeze(0).sigmoid() # 得到 seg 3维  9ms
+    #print("conv2d time {:.3f} ms".format((time.time() - start) * 1000))
+
+    # mask.
+    #seg_masks = seg_preds > mask_thr
+    seg_masks = seg_preds > 0.5 # 大于阈值 # bool
+    sum_masks = seg_masks.sum((1, 2)).float()
+
+    # filter.
+    keep = sum_masks > strides # 大于 seg的大小要大于strides
+    if keep.sum() == 0:
+        return None
+
+    seg_masks = seg_masks[keep, ...] # bool
+    seg_preds = seg_preds[keep, ...]
+    sum_masks = sum_masks[keep]
+    cate_scores = cate_scores[keep]
+    cate_labels = cate_labels[keep]
+
+    # mask scoring.
+    seg_scores = (seg_preds * seg_masks.float()).sum((1, 2)) / sum_masks
+    cate_scores *= seg_scores # 得分相乘 得到 置信度
+
+    # sort and keep top nms_pre
+    sort_inds = torch.argsort(cate_scores, descending=True) # 按得分高低进行排列
+    if len(sort_inds) > max_per_img: # 取前100个
+        sort_inds = sort_inds[:max_per_img]
+    seg_masks = seg_masks[sort_inds, :, :]
+    seg_preds = seg_preds[sort_inds, :, :]
+    sum_masks = sum_masks[sort_inds]
+    cate_scores = cate_scores[sort_inds]
+    cate_labels = cate_labels[sort_inds]
+
+    # Matrix NMS
+    cate_scores = matrix_nms(seg_masks, cate_labels, cate_scores,
+                                kernel='gaussian',sigma=2.0, sum_masks=sum_masks) #
+
+    return seg_preds, cate_labels, cate_scores    
+
+
+def matrix_nms(seg_masks, cate_labels, cate_scores, kernel='gaussian', sigma=2.0, sum_masks=None):
+    """Matrix NMS for multi-class masks.
+
+    Args:
+        seg_masks (Tensor): shape (n, h, w)
+        cate_labels (Tensor): shape (n), mask labels in descending order
+        cate_scores (Tensor): shape (n), mask scores in descending order
+        kernel (str):  'linear' or 'gauss' 
+        sigma (float): std in gaussian method
+        sum_masks (Tensor): The sum of seg_masks
+
+    Returns:
+        Tensor: cate_scores_update, tensors of shape (n)
+    """
+    n_samples = len(cate_labels)
+    if n_samples == 0:
+        return []
+    if sum_masks is None:
+        sum_masks = seg_masks.sum((1, 2)).float()
+    seg_masks = seg_masks.reshape(n_samples, -1).float()
+    # inter.
+    inter_matrix = torch.mm(seg_masks, seg_masks.transpose(1, 0))
+    # union.
+    sum_masks_x = sum_masks.expand(n_samples, n_samples)
+    # iou.
+    iou_matrix = (inter_matrix / (sum_masks_x + sum_masks_x.transpose(1, 0) - inter_matrix)).triu(diagonal=1)
+    # label_specific matrix.
+    cate_labels_x = cate_labels.expand(n_samples, n_samples)
+    label_matrix = (cate_labels_x == cate_labels_x.transpose(1, 0)).float().triu(diagonal=1)
+
+    # IoU compensation
+    compensate_iou, _ = (iou_matrix * label_matrix).max(0)
+    compensate_iou = compensate_iou.expand(n_samples, n_samples).transpose(1, 0)
+
+    # IoU decay 
+    decay_iou = iou_matrix * label_matrix
+
+    # matrix nms
+    if kernel == 'gaussian':
+        decay_matrix = torch.exp(-1 * sigma * (decay_iou ** 2))
+        compensate_matrix = torch.exp(-1 * sigma * (compensate_iou ** 2))
+        decay_coefficient, _ = (decay_matrix / compensate_matrix).min(0)
+    elif kernel == 'linear':
+        decay_matrix = (1-decay_iou)/(1-compensate_iou)
+        decay_coefficient, _ = decay_matrix.min(0)
+    else:
+        raise NotImplementedError
+
+    # update the score.
+    cate_scores_update = cate_scores * decay_coefficient
+    return cate_scores_update
+
+
+def vis_seg(image_raw, result, score_thresh):
+    '''
+    draw mask in image
+    '''
+
+    img_show = image_raw # no pad
+    seg_show = img_show.copy()
+
+    ori_h,ori_w,_ = image_raw.shape
+
+    if result!=None:
+        seg_label = result[0].cpu().numpy() # seg
+        output_scale = [ ori_w/seg_label.shape[2] , ori_h/seg_label.shape[1] ]
+        #seg_label = seg_label.astype(np.uint8) # 变成int8
+        cate_label = result[1] # cate_label
+        cate_label = cate_label.cpu().numpy()
+        score = result[2].cpu().numpy() # cate_scores
+        
+        vis_inds = score > score_thresh 
+        seg_label = seg_label[vis_inds]
+        num_mask = seg_label.shape[0]
+        cate_label = cate_label[vis_inds]
+        cate_score = score[vis_inds]
+
+        for idx in range(num_mask):
+            mask = seg_label[idx, :,:]
+            # cur_mask = cv2.resize(cur_mask,(ori_w,ori_h))
+            cur_mask = (mask> mask_thr).astype(np.uint8)
+            if cur_mask.sum() == 0:
+                continue
+            mask_roi = cv2.boundingRect(cur_mask)
+
+            draw_roi = (int(output_scale[0]*mask_roi[0]),int(output_scale[1]*mask_roi[1]),
+                        int(output_scale[0]*mask_roi[2]),int(output_scale[1]*mask_roi[3]))
+            
+            now_mask = cv2.resize(mask[mask_roi[1]:mask_roi[1]+mask_roi[3],mask_roi[0]:mask_roi[0]+mask_roi[2]],(draw_roi[2],draw_roi[3]))
+            now_mask = (now_mask> mask_thr).astype(np.uint8)
+            color_mask = (np.random.randint(0,255),np.random.randint(0,255),np.random.randint(0,255))
+
+            contours,_ = cv2.findContours(now_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
+
+            draw_roi_mask = seg_show[ draw_roi[1]:draw_roi[1]+ draw_roi[3] , draw_roi[0]:draw_roi[0]+ draw_roi[2] ,:]
+            cv2.drawContours(draw_roi_mask,contours,-1,color_mask,2)
+
+            cur_cate = cate_label[idx]
+            cur_score = cate_score[idx]
+
+            label_text = class_names[cur_cate]
+
+            vis_pos = (max(int(draw_roi[0]) - 10, 0), int(draw_roi[1])) #1ms
+            #vis_pos = (max(int(center_x) - 10, 0), int(center_y)) #1ms
+            cv2.rectangle(seg_show,(draw_roi[0],draw_roi[1]),(draw_roi[0]+ draw_roi[2],draw_roi[1]+ draw_roi[3]),(0,0,0),thickness=2)
+            cv2.putText(seg_show, label_text, vis_pos,
+                        cv2.FONT_HERSHEY_COMPLEX, 1, (0, 0, 0))  # green 0.1ms
+    
+    return  seg_show
+
+
+def main():
+
+    args = argparse.ArgumentParser(description="trt pose predict")
+    args.add_argument("--onnx_path",type=str)
+    args.add_argument("--engine_path",type=str)
+    args.add_argument("--mode",type=str,choices=["fp32","fp16"])
+    args.add_argument("--image_path",type=str,default="demo/demo.jpg")
+    args.add_argument("--h",type=int,default=800)
+    args.add_argument("--w",type=int,default=1344)
+    args.add_argument("--mode",type=str,default="fp16")
+    args.add_argument('--score_thr', type=float, default=0.3, help='score threshold for visualization')
+    args.add_argument("--save",type=str,default="result.jpg")
+    args.add_argument("--show",action="store_true")
+    opt = args.parse_args()
+
+    insize = [1,3,opt.h,opt.w]
+    model = TRT_model(insize,opt.onnx_path,opt.engine_path,opt.mode)
+    preprocesser = Preprocessimage(insize)
+    if opt.show:
+        cv2.namedWindow("output",0)
+    ############start inference##############
+    image, image_raw,img_metas = preprocesser.process(opt.image_path)
+    start = time.time()
+    with torch.no_grad():
+        result = model(image)
+    print("inference time {:.3f} ms".format((time.time() - start) * 1000))
+    if opt.save or opt.show:
+        result_image = vis_seg(image_raw, result, score_thresh=opt.score_thr)
+        if opt.save:
+            cv2.imwrite(opt.save,result_image)
+        if opt.show:
+            cv2.imshow("output",result_image)
+            cv2.waitKey(0)
+
+
+if __name__=="__main__":
+    main()
