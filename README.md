@@ -12,7 +12,7 @@ TensorRT for SOLO(use python)
 
 ### 1. Convert solo model form pytorch to onnx
 
-    python3 get_onnx.py --config ${SOLO_path}/configs/solov2_r101_fpn_8gpu_3x.py --checkpoint SOLOv2_R101_3x.pth --outputname solov2_r101.onnx 
+    python3 get_onnx.py --config ${SOLO_path}/configs/solov2_r101_fpn_8gpu_3x.py --checkpoint ${SOLO_path}/work_dirs/SOLOv2_R101_3x.pth --outputname solov2_r101.onnx 
 
 ### 2.Genrate tensorRT engine and inference
 
