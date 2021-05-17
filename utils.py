@@ -202,8 +202,11 @@ def vis_seg(image_raw, result, score_thresh):
                 continue
             mask_roi = cv2.boundingRect(cur_mask)
 
-            draw_roi = (int(output_scale[0]*mask_roi[0]),int(output_scale[1]*mask_roi[1]),
-                        int(output_scale[0]*mask_roi[2]),int(output_scale[1]*mask_roi[3]))
+            draw_roi = (max(int(output_scale[0]*mask_roi[0]),0),
+                        max(int(output_scale[1]*mask_roi[1]),0),
+                        min(int(output_scale[0]*mask_roi[2]),ori_h-1),
+                        min(int(output_scale[1]*mask_roi[3]),ori_w-1)
+                        )
             
             now_mask = cv2.resize(mask[mask_roi[1]:mask_roi[1]+mask_roi[3],mask_roi[0]:mask_roi[0]+mask_roi[2]],(draw_roi[2],draw_roi[3]))
             now_mask = (now_mask> mask_thr).astype(np.uint8)
