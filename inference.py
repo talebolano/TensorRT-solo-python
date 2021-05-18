@@ -49,7 +49,7 @@ class Preprocessimage(object):
     '''
     def __init__(self,inszie):
         self.inszie = (inszie[3],inszie[2])
-	self.Normalize = Normalize(mean=[0.485,0.456,0.406],std=[0.229,0.224,0.225] ) 
+        self.Normalize = Normalize(mean=[0.485,0.456,0.406],std=[0.229,0.224,0.225] ) 
 		
     def process(self,image_path):
         image = cv2.imread(image_path)#[...,::-1] # bgr rgb
