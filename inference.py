@@ -93,14 +93,14 @@ class TRT_model(nn.Module):
                 trt.Runtime(self.TRT_LOGGER) as runtime:
                     self.engine = runtime.deserialize_cuda_engine(f.read())
         else:
-            self.engine = build_engine()
+            self.engine = self.build_engine()
 
         self.context = self.engine.create_execution_context()  
 
     def _on_state_dict(self, state_dict, prefix, local_metadata):
         state_dict[prefix + 'engine'] = bytearray(self.engine.serialize())
 
-    def build_engine():
+    def build_engine(self):
         EXPLICIT_BATCH = 1<<(int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         with trt.Builder(self.TRT_LOGGER) as builder,\
             builder.create_network(EXPLICIT_BATCH) as network,\
@@ -120,7 +120,7 @@ class TRT_model(nn.Module):
                 print("Begining parsing....")
                 parser.parse(model.read())
             print("completed parsing")
-            print("Building an engine from file {}".format(onnx_path))
+            print("Building an engine from file {}".format(self.onnx_path))
 
             network.get_input(0).shape = self.input_size 
             engine = builder.build_cuda_engine(network)
