@@ -61,7 +61,7 @@ class Preprocessimage(object):
         new_H,new_W,_ = image.shape
 
         image_raw =  cv2.cvtColor(image,cv2.COLOR_RGB2BGR)
-        image = torch.form_numpy(image).float().cuda()
+        image = torch.from_numpy(image).float().cuda()
         image = image.permute(2,0,1) # chw
         image = self.Normalize(image/255.)
         image = image.unsqueeze(0)
